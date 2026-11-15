@@ -321,3 +321,30 @@ Use tenant authorization, cursor pagination, and documented retention periods. D
 Scale API replicas, fanout workers, and delivery workers independently. Start with PostgreSQL-backed work claiming, such as `FOR UPDATE SKIP LOCKED`, and policy-aware leases.
 
 If measured throughput or database contention justifies a broker, introduce it through a transactional outbox with idempotent consumers. PostgreSQL remains the source of truth; avoid uncoordinated database-to-broker dual writes.
+
+## Points of Failure and Mitigations
+
+The service must distinguish between **loss**, **duplication**, **delay**, and an **unknown outcome**. An unknown outcome means the network or worker failed before the service could establish whether the consumer processed the request; it must never be reported as a confirmed success.
+
+| Stage | Failure points | Result | Mitigations |
+|---|---|---|---|
+| Producer and API | Invalid payload, authentication failure, overload, request timeout, lost response, or idempotency-key conflict | Event rejected, or producer cannot tell whether it was accepted | Runtime validation, authentication, admission limits, durable idempotency keys, and retry with the same key |
+| Ingestion transaction | Database unavailable, transaction rollback, connection-pool exhaustion, deadlock, replication/failover loss, or storage corruption | Event must not be acknowledged; an accepted event could be lost if durability is misconfigured | Commit event and fanout job atomically, acknowledge only after commit, use HA/replication, backups, restore tests, and explicit error responses |
+| Subscription management | Invalid rules, unsafe webhook URL, concurrent update/delete, authorization bug, or secret loss | Incorrect matching, unauthorized delivery, or inability to verify the consumer | Schema validation, HTTPS/SSRF checks, tenant authorization, versioned rules, encrypted secrets, and secret rotation |
+| Fanout and matching | Worker crash, stale lease, duplicate job, rule-evaluation bug, unbounded subscription count, or event/subscription change during routing | Missing, duplicate, or delayed delivery records | Leases, `SKIP LOCKED`, unique `(event_id, subscription_id)` constraint, bounded batches, durable checkpoints, indexed candidate selection, and rule-version snapshots |
+| Delivery coordination | Worker crash before/after claim, stale lock, queue starvation, clock skew, or database contention | Delayed work, duplicate work, or an unknown send state | Durable delivery state, lease expiry, unique delivery IDs, bounded concurrency, monotonic scheduling assumptions, and reconciliation jobs |
+| Webhook transport | DNS/TLS failure, blocked destination, connection reset, timeout, redirect, slow consumer, malformed response, `4xx`, `429`, or `5xx` | Failed, delayed, or unknown delivery; duplicates are possible after lost acknowledgements | HTTPS, SSRF protection, redirect policy, bounded timeouts, response classification, exponential backoff with jitter, `Retry-After`, per-endpoint limits, and circuit breakers |
+| Retry processing | Incorrect retry classification, retry storm, non-durable timer, exhausted budget, or permanent receiver rejection | Lost eventual delivery or excessive load | Persist `next_attempt_at`, cap backoff, add jitter, retain attempt history, use explicit terminal failure/redrive, and alert on backlog |
+| Audit and status | Attempt write fails, state transition is not atomic with audit, retention failure, or incorrect unknown-outcome handling | Inaccurate operational view or inability to prove what happened | Transactional state/audit updates, append-only attempts, explicit `unknown` outcome, reconciliation queries, retention monitoring, and no fabricated success |
+| Security and isolation | Forged signatures, leaked secrets, SSRF, malicious payload/filter, tenant data access bug, or compromised credentials | Unauthorized delivery, data exposure, or internal network access | HMAC signatures, secret encryption/rotation, input limits, restricted filter language, tenant-scoped authorization, outbound network policy, and least-privilege credentials |
+| Operations | Bad deployment, migration incompatibility, resource exhaustion, unavailable dependency, missing alerts, or untested failover | Broad outage, backlog growth, or silent degradation | Backward-compatible migrations, graceful shutdown, health checks, metrics/logs/traces, capacity alerts, staged rollout, backups, and disaster-recovery tests |
+
+### Guarantee-Specific Failure Boundaries
+
+- **At-most-once:** the sender consumes authorization before sending. A crash before the HTTP request can lose the notification; a crash after the request can leave an unknown outcome. The sender must not retry either case.
+- **At-least-once:** failures and unknown outcomes are retried, so the same delivery can arrive more than once. Permanent rejection, cancellation, exhausted retry budget, or indefinite receiver outage can still prevent delivery.
+- **Exactly-once processing:** HTTP requests may repeat. The receiver must transactionally insert the stable `deliveryId`, apply business changes, and record completion in one transaction. Receiver data loss, expired deduplication records, non-atomic business effects, premature acknowledgement, or non-idempotent external side effects breaks the guarantee.
+
+### Detection and Recovery
+
+Monitor ingestion errors, routing lag, oldest pending delivery, retry rate, unknown outcomes, terminal failures, webhook latency, database pool usage, lock contention, and audit-write failures. Alert when backlog or age thresholds are exceeded. Recovery procedures should support worker restart, lease reclamation, explicit redrive, subscription disablement, and database restoration without silently changing a delivery's policy or identity.
