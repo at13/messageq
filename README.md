@@ -96,6 +96,33 @@ Audit endpoints:
 - `GET /subscriptions/:id/deliveries`
 - `GET /deliveries/:id/attempts`
 
+### Event Queue Full
+
+`EVENT_QUEUE_CAPACITY` limits accepted events awaiting fanout (default `10000`, valid range `1`-`1000000`). Pending and processing fanout jobs occupy slots; completed jobs do not. This is not a limit on retained events, payload bytes, or pending webhook deliveries.
+
+When no slot is available, a **new** event is rejected before persistence:
+
+```http
+HTTP/1.1 503 Service Unavailable
+Retry-After: 5
+Content-Type: application/json
+```
+
+```json
+{
+  "code": "EVENT_QUEUE_FULL",
+  "error": "Event queue is full",
+  "capacity": 10000,
+  "queuedEvents": 10000
+}
+```
+
+Retry after the indicated delay with jitter and the **same idempotency key**. An already-accepted event still returns `202` with its existing ID even when the queue is full; conflicting reuse returns `409`. JSON object key order does not affect replay comparison.
+
+Admission is coordinated through a PostgreSQL transaction-scoped advisory lock: idempotency lookup, queue count, and event/job insertion are serialized across API replicas. A rejected transaction creates neither event nor job. Configure the same capacity on all replicas and roll out this version consistently; older instances that bypass admission can exceed the limit.
+
+For simplicity, each ingestion counts unfinished jobs under one global lock, with a partial index supporting that query. This trades ingestion parallelism for correctness; replace it with a carefully maintained transactional counter/reservation scheme if measured throughput requires it. A blocked or unavailable database can still cause an internal error or timeout rather than this queue-full response. Queue capacity alone does not bound delivery backlog or storage use.
+
 ## Filter Rule Syntax
 
 Rules are JSON:
@@ -129,7 +156,7 @@ npm run test:integration
 npm test
 ```
 
-The unit suite covers matching/retry decisions and load-runner behavior. Viewer integration tests use real PostgreSQL and HTTP to cover session isolation, signed receipt persistence, simulated retry, at-most-once failure, and concurrent deduplication. Set `DATABASE_URL` to an isolated test database before running `npm test` or `npm run test:integration`; `.env` is not automatically loaded by npm scripts. CI supplies a dedicated PostgreSQL service. Full crash-boundary and failover coverage remains future work.
+The unit suite covers matching/retry decisions, admission configuration, and load-runner behavior. API integration tests cover queue saturation, retry/conflict behavior, concurrent capacity enforcement, and capacity release. Viewer integration tests use real PostgreSQL and HTTP to cover session isolation, signed receipt persistence, simulated retry, at-most-once failure, and concurrent deduplication. Set `DATABASE_URL` to an isolated test database with no unfinished jobs before running `npm test` or `npm run test:integration`; `.env` is not automatically loaded by npm scripts. Database suites run sequentially because they share that database; individual concurrency tests still issue parallel requests. CI supplies a dedicated PostgreSQL service. Full crash-boundary and failover coverage remains future work.
 
 ### CI and Merge Policy
 
