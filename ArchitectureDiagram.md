@@ -115,6 +115,7 @@ prove arbitrary external processing. None of the modes implies ordering.
 | Bad JSON/envelope/headers | `400` | No acceptance; validation details/request ID |
 | Body/media type | `413` / `415` | 1MiB body bound |
 | Nginx rate limit | `429`, `Retry-After: 5` | Per-source limit, not tenant quota |
+| Nginx cannot connect / upstream response deadline | `502` / `504` | Retry the same key: backend commit can be ambiguous; brief restart downtime is observable |
 | Conflicting key reuse | `409` | Same-content retries remain valid |
 | Event queue full | `503 EVENT_QUEUE_FULL`, `Retry-After: 5` | Atomic cross-node capacity gate; delivery backlog/storage remain uncapped |
 | DB connection/resource/transaction outage | Retryable `503`; readiness `503` | No success-shaped acceptance; ambiguous commit reconciled by same key |

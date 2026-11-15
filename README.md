@@ -118,6 +118,7 @@ future routing; already-created deliveries continue.
 | Oversized body / unsupported media type | `413` / `415`; correct size/type |
 | Same producer/key with different content | `409`; use the original content or a new logical key |
 | Proxy rate limit | `429`, `Retry-After: 5`; retry with jitter |
+| Proxy cannot reach API / upstream timeout | `502` / `504`; acceptance may be unknown, retry the same key |
 | Unfinished event queue full | `503`, `EVENT_QUEUE_FULL`, `Retry-After: 5`; retry the same key |
 | Database unavailable, exhausted resources or retryable transaction failure | `503`, `SERVICE_UNAVAILABLE`, `Retry-After: 5` |
 | Unexpected internal failure | `500`, sanitized error and request ID; investigate and retry the same key |
@@ -235,6 +236,7 @@ threshold failures. Nonzero exit means failure; report writes never overwrite fi
 It is closed-loop: it slows under saturation and does not measure coordinated-omission
 latency. Ingestion `202` is not evidence of delivery throughput. Public Nginx limits
 each source to 10 RPS; do not disable shared-host protections to improve a benchmark.
+The proxy also limits each source to 20 active connections and bounds idle header/body waits.
 
 ## Observability and operations
 
