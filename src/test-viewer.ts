@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { pool, withTx } from './db.js';
+import { jsonValue, rulesSchema } from './validation.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -12,11 +13,7 @@ declare module 'fastify' {
 
 const subscriptionInput = z.object({
   deliveryMode: z.enum(['at_most_once', 'at_least_once', 'exactly_once']),
-  rules: z.object({
-    type: z.string().min(1).optional(),
-    source: z.string().min(1).optional(),
-    payload: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
-  }),
+  rules: rulesSchema,
   failFirst: z.number().int().min(0).max(10).default(0),
 });
 const notificationInput = z.object({
@@ -24,7 +21,7 @@ const notificationInput = z.object({
   eventId: z.string().uuid(),
   type: z.string(),
   source: z.string(),
-  payload: z.record(z.string(), z.unknown()),
+  payload: jsonValue,
 });
 
 async function sessionId(request: FastifyRequest): Promise<string> {

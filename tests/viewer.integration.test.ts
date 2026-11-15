@@ -6,6 +6,7 @@ import { migrate, pool, fanoutOnce, deliverOnce } from '../src/db.js';
 const sessions: string[] = [];
 const eventIds: string[] = [];
 const app = buildApp({ testViewer: true });
+const bearer = { authorization: `Bearer ${process.env.API_TOKEN}` };
 
 beforeAll(async () => {
   if (!process.env.DATABASE_URL) throw new Error('Viewer integration tests require DATABASE_URL pointing to an isolated PostgreSQL database');
@@ -27,11 +28,11 @@ afterAll(async () => {
 });
 
 async function session() {
-  const response = await app.inject({ method: 'POST', url: '/test-viewer/sessions' });
+  const response = await app.inject({ method: 'POST', url: '/test-viewer/sessions', headers: bearer });
   expect(response.statusCode).toBe(201);
   const id = response.json().id as string;
   sessions.push(id);
-  return { 'x-test-viewer-session': id };
+  return { ...bearer, 'x-test-viewer-session': id };
 }
 
 async function setup(mode: string, failFirst = 0) {
@@ -45,7 +46,7 @@ async function setup(mode: string, failFirst = 0) {
   const subscriptionId = response.json().id as string;
   const event = await app.inject({
     method: 'POST', url: '/events',
-    headers: { 'idempotency-key': randomUUID(), 'x-producer-id': headers['x-test-viewer-session'] },
+    headers: { ...bearer, 'idempotency-key': randomUUID(), 'x-producer-id': headers['x-test-viewer-session'] },
     payload: { type, source: 'integration', payload: { customer: { tier: 'gold' }, message: '<script>not HTML</script>' } },
   });
   expect(event.statusCode).toBe(202);
@@ -81,7 +82,7 @@ describe('test viewer', () => {
     const html = await app.inject('/test-viewer/');
     expect(html.statusCode).toBe(200);
     expect(html.body).toContain('MessageQ Test Viewer');
-    expect((await app.inject('/test-viewer/state')).statusCode).toBe(401);
+    expect((await app.inject({ url: '/test-viewer/state', headers: bearer })).statusCode).toBe(401);
     const own = await setup('at_least_once');
     const foreign = await session();
     const state = (await app.inject({ url: '/test-viewer/state', headers: own.headers })).json();

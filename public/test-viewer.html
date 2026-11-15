@@ -31,8 +31,14 @@
 <body>
   <h1>MessageQ Test Viewer</h1>
   <p class="muted">Send an event, match a subscription, and watch the signed notification arrive.</p>
-  <p class="notice">Test-only service. This public HTTP deployment has no production authentication or TLS.
-    Do not send sensitive data. The built-in receiver deduplicates by delivery ID; one receipt represents one demo business effect.</p>
+  <p class="notice">Test viewer: API access requires a bearer token. Use HTTPS and non-sensitive test data.
+    The built-in receiver deduplicates by delivery ID; one receipt represents one demo business effect.</p>
+  <form id="connect-form" class="toolbar">
+    <label for="api-token">API token</label>
+    <input id="api-token" type="password" autocomplete="off" placeholder="Paste your API token" required>
+    <button type="submit">Connect</button>
+    <button id="disconnect" type="button" class="secondary">Disconnect and clear session</button>
+  </form>
   <div class="toolbar">
     <button id="new-session" class="secondary">New test session</button>
     <button id="refresh" class="secondary">Refresh</button>
@@ -65,7 +71,7 @@
         <input id="event-type" required>
         <label for="event-source">Source</label>
         <input id="event-source" value="test-viewer" required>
-        <label for="event-payload">Payload (JSON object)</label>
+        <label for="event-payload">Payload (JSON)</label>
         <textarea id="event-payload" rows="5" required>{"message":"Hello from the viewer","customer":{"tier":"gold"}}</textarea>
         <button type="submit">Send event</button>
       </form>

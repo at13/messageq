@@ -7,24 +7,30 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
-    "start": "node dist/main.js",
+    "start": "node --import ./dist/telemetry.js dist/main.js",
     "load:test": "tsc -p tsconfig.load.json && node dist-tests/load-test.js",
-    "dev": "npm run build && node --env-file=.env dist/main.js",
+    "dev": "npm run build && node --env-file=.env --import ./dist/telemetry.js dist/main.js",
     "migrate": "npm run build && node dist/migrate.js",
     "test": "vitest run",
-    "test:unit": "vitest run tests/unit.test.ts tests/load-test.test.ts",
-    "test:integration": "vitest run tests/integration.test.ts tests/viewer.integration.test.ts"
+    "test:unit": "vitest run tests/unit.test.ts tests/load-test.test.ts tests/webhook.test.ts",
+    "test:integration": "vitest run tests/integration.test.ts tests/viewer.integration.test.ts tests/worker.integration.test.ts"
   },
   "dependencies": {
     "fastify": "^5.6.2",
-    "ipaddr.js": "^2.2.0",
+    "ipaddr.js": "^2.5.0",
     "pg": "^8.16.3",
-    "zod": "^4.1.12"
+    "zod": "^4.1.12",
+    "@prometheus-io/client": "^0.16.1",
+    "@opentelemetry/sdk-node": "^0.301.2",
+    "@opentelemetry/api": "^1.10.0",
+    "@opentelemetry/instrumentation-http": "^0.301.2",
+    "@opentelemetry/instrumentation-pg": "^0.78.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.301.2"
   },
   "devDependencies": {
     "@types/node": "^22.18.0",
     "@types/pg": "^8.15.5",
     "typescript": "latest",
-    "vitest": "^3.2.4"
+    "vitest": "^5.1.0"
   }
 }

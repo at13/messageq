@@ -1,9 +1,36 @@
 import { buildApp } from './app.js';
-import { deliverOnce, fanoutOnce, migrate } from './db.js';
-await migrate();
-const port = Number(process.env.PORT ?? 3000);
+import { pool } from './db.js';
+import { startWorkers } from './worker.js';
+import { shutdownTelemetry } from './telemetry.js';
+
+function positiveInteger(value: string | undefined, fallback: number, name: string) {
+  const number = Number(value ?? fallback);
+  if (!Number.isInteger(number) || number < 1) throw new Error(`${name} must be a positive integer`);
+  return number;
+}
+const port = positiveInteger(process.env.PORT, 3000, 'PORT');
 const app = buildApp({ testViewer: process.env.TEST_VIEWER_ENABLED === 'true', callbackOrigin: `http://127.0.0.1:${port}` });
-await app.listen({ port, host: process.env.HOST ?? '0.0.0.0' });
-const interval = setInterval(async () => { try { await fanoutOnce(); await deliverOnce(); } catch (error) { app.log.error(error); } }, Number(process.env.WORKER_INTERVAL_MS ?? 500));
-const shutdown = async () => { clearInterval(interval); await app.close(); process.exit(0); };
-process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+await app.listen({ port, host: process.env.HOST ?? '127.0.0.1' });
+const workers = startWorkers({
+  intervalMs: positiveInteger(process.env.WORKER_INTERVAL_MS, 500, 'WORKER_INTERVAL_MS'),
+  batchSize: positiveInteger(process.env.WORKER_BATCH_SIZE, 4, 'WORKER_BATCH_SIZE'),
+  timeoutMs: positiveInteger(process.env.WEBHOOK_TIMEOUT_MS, 5000, 'WEBHOOK_TIMEOUT_MS'),
+  leaseMs: positiveInteger(process.env.DELIVERY_LEASE_MS, 30000, 'DELIVERY_LEASE_MS'),
+  logger: app.log,
+});
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  try {
+    await workers.stop();
+    await app.close();
+    await pool.end();
+    await shutdownTelemetry();
+  } catch (error) {
+    app.log.error({ err: error }, 'Graceful shutdown failed');
+    process.exitCode = 1;
+  }
+}
+process.on('SIGTERM', () => void shutdown());
+process.on('SIGINT', () => void shutdown());

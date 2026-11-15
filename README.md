@@ -1,209 +1,273 @@
 # MessageQ
 
-MessageQ is a TypeScript event ingestion and webhook fanout service. It accepts structured events, durably matches them to subscriptions, retries deliveries, and exposes delivery audit history.
+A TypeScript/Fastify REST service with PostgreSQL-backed durable ingestion,
+subscription matching, signed webhook delivery, retries, and queryable audit history.
+See the implemented flow and failure boundaries in [ArchitectureDiagram.md](./ArchitectureDiagram.md).
 
 ## Setup
 
-Requirements: Node.js 22.18+, PostgreSQL 16+, and npm.
+Requirements: a supported, patched Node 22 release (CI/deployment: **22.23.5**),
+npm, and PostgreSQL 16+. All development belongs under `/workspaces/messageq`.
+An Ubuntu 24 VS Code devcontainer configuration is provided in
+[.devcontainer](./.devcontainer); it requires Docker and a reachable PostgreSQL server.
+The connected machine is currently a VM, not an IDE-attached Docker container.
 
 ```bash
+cd /workspaces/messageq
+npm ci
 cp .env.example .env
-npm install
-npm run migrate
+# Edit DATABASE_URL and API_TOKEN. Generate a token with: openssl rand -hex 32
+# Keep .env private: chmod 600 .env
 npm run build
-npm test
-npm start
+node --env-file=.env dist/migrate.js
+node --env-file=.env --import ./dist/telemetry.js dist/main.js
 ```
 
-### Connected Remote Host
+`API_TOKEN` is required and must have at least 32 characters. `.env` is **not**
+automatically loaded by npm commands; `npm run dev` explicitly loads it.
+Run migrations once as an operator, before starting/upgrading workers. Startup
+does not run DDL. Use separate migration-owner and application database roles in
+deployment; the application needs table DML, not schema ownership.
+Example database credentials are for isolated development/CI only.
+Review/deactivate legacy subscriptions created while the earlier demo was
+unauthenticated before sending real data; new authentication does not retroactively
+establish ownership or trust in old registered destinations.
 
-Set `HOST=127.0.0.1` when deploying for development: the API currently has no authentication and should not be exposed publicly. Pass environment variables to the compiled service, or load your local `.env` using `node --env-file=.env dist/main.js`. `npm start` does not automatically load `.env`.
+## Public deployment and local testing
 
-To test from your local machine, forward remote port 3000 using the VS Code Ports panel, or open an SSH tunnel:
+The connected deployment is **https://143.110.253.222**. Nginx terminates trusted
+TLS and proxies to the private API port. HTTP redirects to HTTPS; do not send a
+bearer token over public HTTP. The service runs as a non-root systemd user.
+Deployment database and API credentials are generated privately, not committed.
+
+- [Nginx configuration](./deploy/messageq.nginx.conf)
+- [Application supervision](./deploy/messageq.service)
+- [Hourly certificate renewal](./deploy/messageq-cert-renew.timer)
+- [Private Prometheus monitoring](./deploy/prometheus.yml) and [alerts](./deploy/alerts.yml)
+
+The IP certificate is short-lived (six days). Renewal has been dry-run tested;
+the timer reloads Nginx after renewal. Adjust paths, address and certificates for
+another deployment. Port 3000 and the monitoring port must stay private.
+
+From your **own computer**, clone this repository, securely obtain the deployment
+token from the operator, then run:
 
 ```bash
-ssh -N -L 3000:127.0.0.1:3000 <remote-user>@<remote-host>
+export API_TOKEN='<private-token>'
+node test-client.mjs https://143.110.253.222
+# Optional end-to-end receipt/retry checks when the demo viewer is enabled:
+node test-client.mjs https://143.110.253.222 --viewer
 ```
 
-In another local terminal:
-
-```bash
-curl --fail http://127.0.0.1:3000/subscriptions
-curl --fail -X POST http://127.0.0.1:3000/events \
-  -H 'content-type: application/json' \
-  -H 'idempotency-key: local-smoke-1' \
-  -H 'x-producer-id: local-smoke' \
-  -d '{"type":"local.smoke","source":"local-terminal","payload":{"test":true}}'
-```
-
-Repeat the second request with the same key and content: it should return the same event ID. Use `GET /events/<event-id>/deliveries` to inspect fanout results; an empty array is expected when no subscription matches.
-
-### Public Nginx Test Deployment
-
-The connected host's test URL is `http://143.110.253.222`. Nginx proxies public port 80 to the Node service on `127.0.0.1:3000`. The configuration is in [deploy/messageq.nginx.conf](./deploy/messageq.nginx.conf); change `server_name` for a different host. Port 3000 need not be opened publicly.
-
-**Temporary testing only:** the API has no authentication or tenant authorization, and this HTTP endpoint has no TLS. Anyone able to reach it can submit events, inspect history, and manage subscriptions. Do not send secrets or production data. Rate limiting reduces accidental load but does not provide access control. Before production, add authentication, authorization, TLS with a domain/certificate, and network restrictions.
-
-From your own computer, copy [test-client.mjs](./test-client.mjs) or clone this workspace and run with Node.js 22.18+:
-
-```bash
-node test-client.mjs http://143.110.253.222
-```
-
-The client needs no npm dependencies. It checks public reachability, validation, event acceptance, sequential idempotency, conflicting key reuse, and the delivery-history response shape. It creates one uniquely identified event per run and does not delete it, since event deletion is not an API operation. It does not establish webhook delivery guarantees or prove that fanout has completed. A run from the remote host against its public IP is not a test from your local computer.
-
-### Browser Test Viewer
-
-Set `TEST_VIEWER_ENABLED=true` and restart the service to enable `/test-viewer/`. The connected test deployment exposes the viewer at `http://143.110.253.222/test-viewer/`.
-
-1. Open the viewer; it creates a session and proposes a unique event type.
-2. Create a subscription with filter JSON and a delivery mode.
-3. Optionally set **Fail the first N requests** to observe HTTP `503` retries. At-most-once stops after its first failed request.
-4. Send an event with the same type and matching payload.
-5. Watch delivery state, view attempt history, and inspect the received notification. Disable subscriptions when finished.
-
-The viewer uses the same ingestion, matching, fanout, signing, delivery, and audit code as other subscribers. It registers only a fixed loopback receiver, never a user-provided internal URL; public webhook URL validation is not relaxed. Sessions isolate the viewer's management/state endpoints with an unguessable session ID, but **this does not add authentication to the rest of the API**.
-
-The demo receiver verifies the HMAC against the raw request body, stores one receipt per delivery ID transactionally, and acknowledges only after commit. Concurrent/repeated requests increment the receipt's receive count without creating another demo business effect. This illustrates exactly-once processing of a database receipt, not arbitrary external side effects. Notifications and sessions survive process restart in PostgreSQL. State lists show the latest 100 records; test-data retention and session expiry are not implemented. Failure simulation is per subscription, not per event.
-
-The viewer is disabled by default and should remain disabled in production. It adds no publicly callable load-generation endpoint. Browser traffic polls at most once every two seconds while visible. As with the public API, use only non-sensitive data on this unauthenticated HTTP test deployment.
-
-For local PostgreSQL:
-
-```bash
-createdb messageq
-DATABASE_URL=postgres://localhost:5432/messageq npm run migrate
-```
-
-`POST /events` requires `Idempotency-Key` and accepts `type`, `source`, and arbitrary JSON `payload`. `X-Producer-Id` scopes idempotency keys.
+The default client checks ingress, validation, idempotency and audit response shape.
+`--viewer` additionally checks all three demo modes, actual receipt commits and
+503-to-204 retry history, then deactivates its subscriptions. Neither mode proves
+arbitrary external delivery guarantees. A test run on the remote
+host against its public IP is not a test executed on your local computer.
+Tokens must never be committed, included in URLs, or pasted into issue/CI logs.
 
 ## API
 
-```bash
-curl -X POST http://localhost:3000/subscriptions \
-  -H 'content-type: application/json' \
-  -d '{"webhookUrl":"https://example.com/hook","secret":"at-least-8-characters","deliveryMode":"at_least_once","rules":{"type":"order.created","source":"checkout","payload":{"customer.tier":"gold"}}}'
+Every management, event, audit and metrics request requires
+`Authorization: Bearer <API_TOKEN>`. This is a **single-tenant operator API**:
+token holders share management access. `X-Producer-Id` namespaces idempotency
+keys; it is not an authenticated tenant identity.
 
-curl -X POST http://localhost:3000/events \
-  -H 'content-type: application/json' \
-  -H 'idempotency-key: order-123-created' \
+```bash
+export BASE_URL=https://143.110.253.222
+curl --fail "$BASE_URL/subscriptions" \
+  -H "Authorization: Bearer $API_TOKEN"
+
+curl --fail -X POST "$BASE_URL/subscriptions" \
+  -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"webhookUrl":"https://receiver.example/hook","secret":"replace-with-a-strong-signing-secret","deliveryMode":"at_least_once","rules":{"type":"order.created","source":"checkout","payload":{"customer.tier":"gold"}}}'
+
+curl --fail -X POST "$BASE_URL/events" \
+  -H "Authorization: Bearer $API_TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: order-123-created' -H 'X-Producer-Id: checkout' \
   -d '{"type":"order.created","source":"checkout","payload":{"customer":{"tier":"gold"},"orderId":"123"}}'
 ```
 
-Audit endpoints:
+`type` and `source` are nonempty strings, at most 256 characters. `payload` is
+required and may be any JSON value: object, array, string, number, boolean or null.
+Request bodies are limited to 1 MiB. Header identifiers are limited to 256 characters.
+Signing secrets are 16-256 characters and are omitted from management/audit responses.
 
-- `GET /events/:id/deliveries`
-- `GET /subscriptions/:id/deliveries`
-- `GET /deliveries/:id/attempts`
+| Operation | Endpoint |
+|---|---|
+| Accept an event after durable commit | `POST /events` → `202` |
+| Create/list/deactivate subscriptions | `POST /subscriptions`, `GET /subscriptions`, `DELETE /subscriptions/:id` |
+| Event/subscription delivery history | `GET /events/:id/deliveries`, `GET /subscriptions/:id/deliveries` |
+| Individual delivery state | `GET /deliveries/:id` |
+| Individual attempt history | `GET /deliveries/:id/attempts` |
+| Public process/database health | `GET /health/live`, `GET /health/ready` (also HEAD) |
+| Authenticated Prometheus metrics | `GET /metrics` |
 
-### Event Queue Full
+List endpoints accept `limit` (1-100, default 50) and `offset` (0-100000).
+Delivery history includes the latest 100 attempts per delivery; use the separate
+attempts endpoint to paginate the full history. UUID/pagination errors return
+`400`; missing resources return `404`. Deactivation excludes a subscription from
+future routing; already-created deliveries continue.
 
-`EVENT_QUEUE_CAPACITY` limits accepted events awaiting fanout (default `10000`, valid range `1`-`1000000`). Pending and processing fanout jobs occupy slots; completed jobs do not. This is not a limit on retained events, payload bytes, or pending webhook deliveries.
+### Ingestion failures
 
-When no slot is available, a **new** event is rejected before persistence:
+| Failure | Response / producer action |
+|---|---|
+| Missing/invalid bearer token | `401`; correct credentials |
+| Missing headers, invalid envelope or malformed JSON | `400`; correct the request |
+| Oversized body / unsupported media type | `413` / `415`; correct size/type |
+| Same producer/key with different content | `409`; use the original content or a new logical key |
+| Proxy rate limit | `429`, `Retry-After: 5`; retry with jitter |
+| Unfinished event queue full | `503`, `EVENT_QUEUE_FULL`, `Retry-After: 5`; retry the same key |
+| Database unavailable, exhausted resources or retryable transaction failure | `503`, `SERVICE_UNAVAILABLE`, `Retry-After: 5` |
+| Unexpected internal failure | `500`, sanitized error and request ID; investigate and retry the same key |
+| Connection lost before response | Outcome unknown; retry the same key, never assume rejection |
 
-```http
-HTTP/1.1 503 Service Unavailable
-Retry-After: 5
-Content-Type: application/json
-```
+An event and its fanout job commit atomically. `202` means **stored, not delivered**.
+Queue-full rejection persists neither record. A lost response can still follow a
+successful commit; idempotent retry returns the original ID. Object-key order
+does not affect content comparison.
+
+`EVENT_QUEUE_CAPACITY` (default 10000, range 1-1000000) counts pending/processing
+fanout jobs, **not** retained events, payload bytes or webhook backlog. Idempotency,
+capacity check and insertion are serialized by a transaction-scoped advisory
+lock across replicas. Matching retries succeed even when full. Routing completion
+releases capacity. All replicas must use the same capacity and admission protocol.
+
+## Filter rules
 
 ```json
-{
-  "code": "EVENT_QUEUE_FULL",
-  "error": "Event queue is full",
-  "capacity": 10000,
-  "queuedEvents": 10000
-}
+{"type":"order.created","source":"checkout","payload":{"customer.tier":"gold","items.0.sku":"ABC","flags":["paid","checked"]}}
 ```
 
-Retry after the indicated delay with jitter and the **same idempotency key**. An already-accepted event still returns `202` with its existing ID even when the queue is full; conflicting reuse returns `409`. JSON object key order does not affect replay comparison.
+All supplied conditions are ANDed. Type/source are exact string matches.
+Payload paths are dot-separated own-property paths, including array indices.
+Values use structural JSON equality: object key order is irrelevant; array order
+and value types matter. Missing differs from null. `{}` matches everything.
+Prototype-related paths and empty path segments are rejected. There are no
+wildcards, comparisons, executable expressions, OR conditions, or subscription updates.
 
-Admission is coordinated through a PostgreSQL transaction-scoped advisory lock: idempotency lookup, queue count, and event/job insertion are serialized across API replicas. A rejected transaction creates neither event nor job. Configure the same capacity on all replicas and roll out this version consistently; older instances that bypass admission can exceed the limit.
+## Delivery contract
 
-For simplicity, each ingestion counts unfinished jobs under one global lock, with a partial index supporting that query. This trades ingestion parallelism for correctness; replace it with a carefully maintained transactional counter/reservation scheme if measured throughput requires it. A blocked or unavailable database can still cause an internal error or timeout rather than this queue-full response. Queue capacity alone does not bound delivery backlog or storage use.
+| Mode | Behavior and boundary |
+|---|---|
+| `at_most_once` | One durable send authorization, consumed before HTTP; never restored or retried. Crash/timeout can lose delivery or leave an unknown effect. |
+| `at_least_once` | Retry transport failures, unknown outcomes, `408`, `425`, `429`, and `5xx`. Requests may duplicate. Eventual receipt requires durable sender state, continuing workers and eventual receiver acceptance. |
+| `exactly_once` | Same retried transport, plus **receiver transactional deduplication**. Registration requires `receiverSupportsIdempotency: true`; the declaration cannot prove receiver correctness. |
 
-## Filter Rule Syntax
+Any HTTP `2xx` acknowledges delivery; redirects are never followed. Other `4xx`
+and redirects fail permanently. Retries use persisted exponential backoff with
+50-100% jitter (base 500ms, capped at 60s), honoring `Retry-After` up to 60s.
+There is no finite retry budget for recoverable failures.
+Lease tokens fence stale results. Authorized attempts are persisted before
+network I/O; expired attempts become `unknown`, never fabricated HTTP success.
+Completed success cannot be overwritten by an old worker.
 
-Rules are JSON:
+Webhooks must be HTTPS without URL credentials and resolve only to public
+unicast addresses. DNS is checked at registration **and every attempt**; connections
+pin a validated address while preserving TLS hostname verification. Mixed/public-private,
+loopback, link-local and IPv4-mapped private destinations are blocked. HTTP response
+bodies are not retained; the deadline covers DNS and HTTP.
 
-```json
-{
-  "type": "order.created",
-  "source": "checkout",
-  "payload": {
-    "customer.tier": "gold",
-    "region": "us-east"
-  }
-}
-```
+The envelope contains `deliveryId`, `eventId`, `type`, `source`, and `payload`.
+`X-MessageQ-Delivery-Id` is stable across retries. Verify
+`X-MessageQ-Signature-V2 = hex(HMAC-SHA256(secret, timestamp + "." + rawBody))`
+with `X-MessageQ-Timestamp`, a bounded clock-skew window and constant-time comparison.
+Legacy `X-MessageQ-Signature` signs the raw body without a timestamp and is retained
+for compatibility with the demo receiver.
 
-`type` and `source` are exact matches. Payload keys use dot-separated paths and values use strict equality. Missing paths do not match. The current simple syntax intentionally does not support arbitrary expressions, code execution, or complex boolean operators.
+For exactly-once **business effects**, the receiver must insert the delivery ID
+and apply its business mutation in one database transaction, acknowledge only
+after commit, and durably retain deduplication records. External nontransactional
+effects need their own idempotency protocol. The sender cannot promise exactly-once HTTP.
 
-## Delivery Guarantees
+## Browser test viewer
 
-- `at_most_once`: one sender-authorized HTTP attempt and no retry. A crash or unknown result can lose the notification.
-- `at_least_once`: retryable failures and unknown outcomes are retried with exponential backoff. Duplicate requests are possible.
-- `exactly_once`: transport still retries, but a compatible receiver must transactionally deduplicate the stable `deliveryId` with its business changes. HTTP requests can repeat; the sender alone cannot guarantee exactly-once external effects.
+Enable `TEST_VIEWER_ENABLED=true`; otherwise the viewer is unavailable.
+Open **https://143.110.253.222/test-viewer/**:
 
-The current implementation uses PostgreSQL for durable events, fanout jobs, deliveries, and append-only attempts. The worker claims work with row locks and leases. Webhook delivery requires HTTPS and rejects non-unicast destinations.
+1. Enter the private API token and click **Connect**.
+2. Create a subscription with rules and one of the three delivery modes.
+3. Optionally fail the first N requests to observe retries and audit codes.
+4. Send matching JSON and inspect received receipts, delivery state and attempts.
+5. Disable test subscriptions, then **Disconnect** to clear browser credentials/session.
 
-## Testing
+The token stays in memory, not browser storage. Only the session ID uses session
+storage. The signed receiver is a fixed server-side loopback route; users cannot
+register arbitrary internal URLs. Receipts deduplicate transactionally in PostgreSQL
+and survive restarts. The demo accepts the legacy body signature, illustrating a
+database receipt as the business effect, not arbitrary external effects.
+Viewer sessions/data have no automatic expiry or retention; keep it disabled for production.
+
+## Tests and CI
 
 ```bash
+# Isolated PostgreSQL database only; tests migrate and clean up their fixtures.
+DATABASE_URL=postgres://messageq_test:messageq_test@localhost:5432/messageq_viewer_test npm test
 npm run test:unit
-npm run test:integration
-npm test
+# Use the same isolated DATABASE_URL for npm run test:integration.
+npm run typecheck
+npm run build
+npm audit --omit=dev
 ```
 
-The unit suite covers matching/retry decisions, admission configuration, and load-runner behavior. API integration tests cover queue saturation, retry/conflict behavior, concurrent capacity enforcement, and capacity release. Viewer integration tests use real PostgreSQL and HTTP to cover session isolation, signed receipt persistence, simulated retry, at-most-once failure, and concurrent deduplication. Set `DATABASE_URL` to an isolated test database with no unfinished jobs before running `npm test` or `npm run test:integration`; `.env` is not automatically loaded by npm scripts. Database suites run sequentially because they share that database; individual concurrency tests still issue parallel requests. CI supplies a dedicated PostgreSQL service. Full crash-boundary and failover coverage remains future work.
+CI provides its own PostgreSQL service and test-only bearer token. It runs
+installation, typecheck, build, dependency audit, migration and all tests on
+**every branch push and every pull request**. Protected `main` requires an up-to-date
+successful `test` check, including administrators; publish through PRs.
+See [TestingStrategy.md](./TestingStrategy.md) for executed coverage and limitations.
 
-### CI and Merge Policy
-
-GitHub Actions runs the `test` job on pushes to every branch and pull requests targeting every branch, including typecheck, build, migrations, and the complete test suite. A manual workflow trigger is also available. New pushes cancel older CI runs for the same ref.
-
-The default branch should require the successful `test` status check and up-to-date branches before merge, including administrators. Required-check enforcement is a GitHub branch-protection setting, not something a workflow file can enforce alone. After protection is enabled, use pull requests rather than direct pushes to the default branch.
-
-### Load Testing
-
-The load runner lives in [tests/load-test.ts](./tests/load-test.ts), separate from production source. It uses concurrent HTTP clients, an aggregate rate ceiling, a dispatch-duration limit, and a hard request cap. No extra load-test dependencies are needed.
+### Bounded load tests
 
 ```bash
-# Low-impact smoke load against the deployed Nginx endpoint:
-npm run load:test -- --url http://143.110.253.222 \
-  --duration 5 --rate 2 --concurrency 2
-
-# On an isolated environment authorized for higher load:
-npm run load:test -- --url http://127.0.0.1:3000 \
-  --duration 60 --rate 100 --concurrency 16 \
+API_TOKEN='<private-token>' npm run load:test -- \
+  --url https://143.110.253.222 --duration 5 --rate 2 --concurrency 2
+# Higher load only on an isolated, authorized environment:
+API_TOKEN='<private-token>' npm run load:test -- \
+  --url http://127.0.0.1:3000 --duration 60 --rate 100 --concurrency 16 \
   --max-error-rate 0.01 --max-p99 500 --output load-result.json
-
-npm run load:test -- --help
 ```
 
-JSON reports include attempted/accepted requests, HTTP status counts, network/timeouts, malformed or duplicate acceptance IDs, achieved throughput, latency min/mean/p50/p95/p99/max, bounded error samples, and threshold results. Exit code is nonzero for a failed threshold, interruption, configuration error, or report-write error. Report files are created exclusively rather than overwriting earlier results. For pure JSON stdout, compile with `npx tsc -p tsconfig.load.json` and invoke `node dist-tests/load-test.js` directly. Normal CI tests the runner against controlled HTTP servers; it never load-tests the public deployment.
+[The runner](./tests/load-test.ts) bounds rate, concurrency, duration and request
+count, rejects plaintext authenticated remote URLs, and never follows redirects.
+It reports status counts, acceptance validity, throughput, latency percentiles and
+threshold failures. Nonzero exit means failure; report writes never overwrite files.
+It is closed-loop: it slows under saturation and does not measure coordinated-omission
+latency. Ingestion `202` is not evidence of delivery throughput. Public Nginx limits
+each source to 10 RPS; do not disable shared-host protections to improve a benchmark.
 
-Every request has a fresh producer-scoped idempotency key. Defaults are deliberately conservative: 10 seconds, 5 requests/second, and 4 concurrent requests. Use `--payload-bytes` for padding size, and `--event-type` to target existing subscriptions; without it, the run uses a unique event type. Runs retain their accepted events and jobs; there is no event-delete API. Do not load-test production or a shared host at high rates without permission, capacity limits, and a retention plan.
+## Observability and operations
 
-The rate is a ceiling, not a promise: this bounded, closed-loop generator slows down when concurrency is saturated and does not accumulate an unbounded queue of scheduled requests. Latency measures dispatch through response-body consumption, not time waiting for a dispatch slot, so it does not measure open-loop coordinated-omission latency. Throughput includes draining outstanding requests, which may extend beyond the dispatch duration up to the configured timeout. Signals stop scheduling; in-flight requests drain.
+Structured logs correlate request IDs and delivery IDs without authorization or
+signing secrets. Metrics cover HTTP requests/latency, delivery outcomes/latency,
+fanout/delivery backlog and oldest pending delivery, plus process metrics.
+Private Prometheus runs on `127.0.0.1:9090`, with two-day/256MiB retention and
+availability, backlog and HTTP-error alerts. Rules are validated with `promtool`;
+configure Alertmanager routing before relying on external paging.
 
-**Scope:** a valid `202` with a unique event ID is ingestion success, not proof of completed routing or webhook processing. For fanout/delivery capacity, configure controlled receiver subscriptions in an isolated environment and measure routing lag, delivery backlog, audit records, retry rates, and receiver business effects separately. Nginx currently limits requests to 10 RPS per source IP: higher public-endpoint loads can intentionally produce `429` responses, which are counted as failures rather than retried or hidden. Do not disable that protection on the shared public host just to improve a benchmark.
+Optional HTTP/PostgreSQL traces preload via `dist/telemetry.js`. Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` only to an **operator-controlled** OTLP HTTP collector
+(e.g. `http://127.0.0.1:4318`). No external trace collector is configured on the demo.
+SIGTERM stops claiming, drains work, and closes HTTP, the pool and telemetry.
 
-## What We Sacrifice for Simplicity vs. What We'd Harden Next
+## What we sacrifice for simplicity vs. what we'd harden next
 
-### Sacrificed for simplicity
+**Intentional simplicity:** one PostgreSQL database is both queue and system of
+record; admission uses a global lock; fanout scans active subscriptions and commits
+each event atomically without subscription versions or incremental checkpoints.
+Workers run bounded, nonoverlapping batches rather than an independently deployed
+worker fleet. Equality-only rules, offset pagination and a single operator token
+keep the contract small.
 
-- PostgreSQL is both the durable system of record and work queue; a broker is not required.
-- A single worker loop combines fanout and delivery polling.
-- Filter rules support exact equality only.
-- Authentication and tenant authorization are represented by producer headers and should be replaced with a real identity layer.
-- Delivery pagination is basic and the example API does not include rate limiting.
+**Next production hardening:** high-availability PostgreSQL with tested off-host
+backup restoration/RPO, separate tenant identities and quotas, encrypted secrets
+and rotation, retention/storage limits, large-fanout checkpoints, endpoint isolation
+and circuit breakers, alert delivery, and destructive process/host failover tests.
+Local durable commit is not protection against unrecoverable loss of the database disk.
 
-### Harden next
+**Excluded extensions:** DigitalOcean managed-queue deployment, per-source ordered
+delivery, and replay/redrive APIs are not implemented. Existing state/audit guarantees
+do not imply ordering, disaster-proof durability or unconditional eventual receipt.
 
-1. Add an outbox or managed queue when throughput and queue contention require it.
-2. Add transactional subscription versions and immutable routing snapshots.
-3. Add a dedicated delivery worker pool, dead-letter/redrive controls, and per-endpoint circuit breakers.
-4. Add full tenant authentication, authorization, quotas, and audit access controls.
-5. Add comprehensive crash-injection, concurrent exactly-once receiver, load, and failover tests.
-6. Add OpenTelemetry traces, metrics, alerting, secret management, and tested backup restoration.
+Before workstation handoff, sign out of GitHub CLI and personal editor/browser
+accounts and disconnect the viewer. CLI sign-out does not sign out VS Code/Cursor.

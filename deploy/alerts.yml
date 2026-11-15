@@ -1,0 +1,24 @@
+groups:
+  - name: messageq
+    rules:
+      - alert: MessageQUnavailable
+        expr: up{job="messageq"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: MessageQ metrics endpoint is unreachable
+      - alert: MessageQDeliveryBacklog
+        expr: messageq_oldest_pending_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Pending notifications are older than one minute
+      - alert: MessageQHighErrorRate
+        expr: sum(rate(messageq_http_requests_total{status=~"5..",route!~"/test-viewer/webhooks/.*"}[5m])) / clamp_min(sum(rate(messageq_http_requests_total{route!~"/test-viewer/webhooks/.*"}[5m])), 0.001) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: MessageQ HTTP error ratio exceeds five percent

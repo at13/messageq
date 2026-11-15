@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
   attempt_count integer NOT NULL DEFAULT 0,
   next_attempt_at timestamptz NOT NULL DEFAULT now(),
   locked_until timestamptz,
+  claim_token uuid,
   final_reason text,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE(event_id, subscription_id)
@@ -43,12 +44,22 @@ CREATE TABLE IF NOT EXISTS delivery_attempts (
   id bigserial PRIMARY KEY,
   delivery_id uuid NOT NULL REFERENCES deliveries(id) ON DELETE CASCADE,
   attempt_no integer NOT NULL,
+  claim_token uuid,
   started_at timestamptz NOT NULL,
   completed_at timestamptz,
   response_code integer,
+  -- authorized is a committed send permit, not evidence that HTTP was sent.
+  -- Expired permits become unknown; recovery never overwrites completed history.
   outcome text NOT NULL,
   error text
 );
+-- Additive migration for installations created before pre-send authorization.
+ALTER TABLE deliveries ADD COLUMN IF NOT EXISTS claim_token uuid;
+ALTER TABLE delivery_attempts ADD COLUMN IF NOT EXISTS claim_token uuid;
+CREATE UNIQUE INDEX IF NOT EXISTS delivery_attempts_number_idx ON delivery_attempts(delivery_id, attempt_no);
+CREATE UNIQUE INDEX IF NOT EXISTS delivery_attempts_claim_idx ON delivery_attempts(claim_token) WHERE claim_token IS NOT NULL;
+CREATE INDEX IF NOT EXISTS deliveries_ready_idx ON deliveries(next_attempt_at, id) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS deliveries_leases_idx ON deliveries(locked_until) WHERE locked_until IS NOT NULL;
 CREATE TABLE IF NOT EXISTS test_viewer_sessions (
   id uuid PRIMARY KEY,
   created_at timestamptz NOT NULL DEFAULT now()
