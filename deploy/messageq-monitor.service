@@ -1,0 +1,16 @@
+[Unit]
+Description=MessageQ private Prometheus monitoring
+After=messageq.service
+
+[Service]
+User=messageq
+Group=messageq
+ExecStart=/workspaces/messageq/.tools/prometheus/prometheus --config.file=/workspaces/messageq/deploy/prometheus.yml --storage.tsdb.path=/workspaces/messageq/.runtime/metrics --storage.tsdb.retention.time=2d --storage.tsdb.retention.size=256MB --web.listen-address=127.0.0.1:9090
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/workspaces/messageq/.runtime/metrics
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

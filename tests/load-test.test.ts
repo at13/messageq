@@ -17,6 +17,10 @@ const config = (url: string, extra: string[] = []) => parseOptions([
 ]);
 
 describe('load configuration', () => {
+  it('rejects plaintext remote URLs before transmitting bearer credentials', () => {
+    expect(() => parseOptions(['--url', 'http://example.com'])).toThrow('require HTTPS');
+    expect(() => parseOptions(['--url', 'https://example.com'])).not.toThrow();
+  });
   it('rejects unsafe or invalid configurations', () => {
     for (const args of [['--rate', '0'], ['--concurrency', '1.5'], ['--timeout', 'NaN'], ['--max-requests', '100001'], ['--url', 'file:///tmp/a']]) {
       expect(() => parseOptions(args)).toThrow();

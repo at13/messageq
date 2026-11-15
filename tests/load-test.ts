@@ -32,6 +32,9 @@ export function parseOptions(args: string[]): LoadOptions {
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
     throw new Error('URL must be HTTP(S) without embedded credentials');
   }
+  if (process.env.API_TOKEN && url.protocol !== 'https:' && !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
+    throw new Error('Bearer-authenticated remote load tests require HTTPS');
+  }
   function number(name: string, fallback: number, min: number, max: number, integer = false) {
     const value = Number(values[name] ?? fallback);
     if (!Number.isFinite(value) || value < min || value > max || (integer && !Number.isInteger(value))) {
@@ -98,6 +101,7 @@ export async function runLoad(options: LoadOptions, signal?: AbortSignal) {
           redirect: 'error',
           headers: {
             'content-type': 'application/json',
+            ...(process.env.API_TOKEN ? { authorization: `Bearer ${process.env.API_TOKEN}` } : {}),
             'idempotency-key': `${runId}:${sequence}`,
             'x-producer-id': `load-test:${runId}`,
           },

@@ -1,0 +1,23 @@
+[Unit]
+Description=MessageQ ingestion and notification service
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=messageq
+Group=messageq
+WorkingDirectory=/workspaces/messageq
+EnvironmentFile=/workspaces/messageq/.runtime/service.env
+ExecStart=/workspaces/messageq/.tools/node/bin/node --import ./dist/telemetry.js dist/main.js
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

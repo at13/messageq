@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew MessageQ short-lived IP TLS certificate
+
+[Service]
+Type=oneshot
+ExecStart=/workspaces/messageq/.tools/certbot/bin/certbot renew --quiet --config-dir /workspaces/messageq/.runtime/certbot --work-dir /workspaces/messageq/.runtime/certbot-work --logs-dir /workspaces/messageq/.runtime/certbot-logs --deploy-hook "/usr/sbin/nginx -t && /usr/bin/systemctl reload nginx"

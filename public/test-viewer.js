@@ -5,6 +5,7 @@ const storageKey = 'messageq-test-viewer-session';
 let session;
 let refreshing = false;
 const shownAttempts = new Map();
+let apiToken = '';
 
 function status(message, error = false) {
   byId('status').textContent = message;
@@ -17,6 +18,7 @@ async function api(path, method = 'GET', body, extraHeaders = {}) {
     headers: {
       ...(body === undefined ? {} : { 'content-type': 'application/json' }),
       ...(session ? { 'x-test-viewer-session': session } : {}),
+      authorization: `Bearer ${apiToken}`,
       ...extraHeaders,
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
@@ -59,7 +61,7 @@ function button(parent, text, action) {
 }
 
 async function refresh() {
-  if (refreshing || !session) return;
+  if (refreshing || !session || !apiToken) return;
   refreshing = true;
   try {
     const state = await api('/test-viewer/state');
@@ -102,7 +104,7 @@ async function refresh() {
 async function newSession() {
   const result = await api('/test-viewer/sessions', 'POST');
   session = result.id;
-  localStorage.setItem(storageKey, session);
+  sessionStorage.setItem(storageKey, session);
   byId('session-id').textContent = session;
   byId('event-type').value = `viewer.demo.${session}`;
   byId('rules').value = JSON.stringify({ type: byId('event-type').value }, null, 2);
@@ -157,7 +159,7 @@ setInterval(() => {
 }, 2000);
 
 async function initialize() {
-  session = localStorage.getItem(storageKey);
+  session = sessionStorage.getItem(storageKey);
   if (session) {
     byId('session-id').textContent = session;
     byId('event-type').value = `viewer.demo.${session}`;
@@ -169,4 +171,23 @@ async function initialize() {
   }
 }
 
-initialize().catch(error => status(error.message, true));
+byId('connect-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  apiToken = byId('api-token').value;
+  byId('api-token').value = '';
+  try { await initialize(); }
+  catch (error) { status(error.message, true); }
+});
+byId('disconnect').addEventListener('click', () => {
+  apiToken = '';
+  session = undefined;
+  sessionStorage.removeItem(storageKey);
+  localStorage.removeItem(storageKey);
+  shownAttempts.clear();
+  byId('api-token').value = '';
+  for (const name of ['subscriptions', 'deliveries', 'notifications', 'sent-events']) byId(name).replaceChildren();
+  byId('session-id').textContent = 'Disconnected';
+  status('Disconnected. Token and session cleared.');
+});
+byId('session-id').textContent = 'Enter API token to connect';
+status('Paste the API token and connect. The token is kept in memory only.');
