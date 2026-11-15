@@ -4,10 +4,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { AddressInfo } from 'node:net';
 import {
   claimDelivery, completeDelivery, deliverOnce, fanoutOnce, ingest, migrate, pool,
-  reconcileExpiredLeases, type DeliveryClaim,
+  reconcileExpiredLeases, withTx, type DeliveryClaim,
 } from '../src/db.js';
 import { startWorkers, type Workers } from '../src/worker.js';
 import type { DeliveryMode, JSONValue } from '../src/types.js';
+import { createFanoutDispatcher } from '../src/fanout.js';
+import { processRouting } from '../src/routing.js';
 
 const producer = `worker-test:${randomUUID()}`;
 const subscriptionIds: string[] = [];
@@ -141,22 +143,71 @@ describe('durable worker authorization and recovery', () => {
   });
 
   it('keeps fanout atomic after a partial insert failure, reclaims abandoned jobs and deduplicates rerouting', async () => {
+    const dispatcher = createFanoutDispatcher('postgresql');
     const type = `worker.fanout.${randomUUID()}`;
     await subscription(type);
     await subscription(type);
     const event = await ingest(producer, randomUUID(), { type, source: 'worker-integration', payload: ['value', null] });
     await faultOn('deliveries', 'true', 'EXISTS(SELECT 1 FROM deliveries WHERE event_id=NEW.event_id)');
-    await expect(fanoutOnce()).rejects.toThrow('worker test injected rollback');
+    await expect(dispatcher.dispatchOnce()).rejects.toThrow('worker test injected rollback');
     expect((await pool.query('SELECT id FROM deliveries WHERE event_id=$1', [event.id])).rowCount).toBe(0);
     expect((await pool.query('SELECT status FROM fanout_jobs WHERE event_id=$1', [event.id])).rows[0].status).toBe('pending');
     await removeFault();
     await pool.query("UPDATE fanout_jobs SET status='processing',locked_until=now()-interval '1 second' WHERE event_id=$1", [event.id]);
-    expect((await Promise.all(Array.from({ length: 4 }, () => fanoutOnce()))).reduce((sum, count) => sum + count, 0)).toBe(1);
+    expect((await Promise.all(Array.from({ length: 4 }, () => dispatcher.dispatchOnce()))).reduce((sum, count) => sum + count, 0)).toBe(1);
     const original = (await pool.query('SELECT id FROM deliveries WHERE event_id=$1 ORDER BY id', [event.id])).rows;
     expect(original).toHaveLength(2);
     await pool.query("UPDATE fanout_jobs SET status='pending' WHERE event_id=$1", [event.id]);
-    expect(await fanoutOnce()).toBe(1);
+    expect(await dispatcher.dispatchOnce()).toBe(1);
     expect((await pool.query('SELECT id FROM deliveries WHERE event_id=$1 ORDER BY id', [event.id])).rows).toEqual(original);
+  });
+
+  it('serializes duplicate routing notifications and does not route completed events to later subscriptions', async () => {
+    const type = `worker.shared-routing.${randomUUID()}`;
+    await subscription(type);
+    const event = await ingest(producer, randomUUID(), { type, source: 'worker-integration', payload: null });
+    const results = await Promise.all(Array.from({ length: 2 }, () => withTx(client => processRouting(client, event.id))));
+    expect(results.sort()).toEqual([false, true]);
+    const original = (await pool.query('SELECT id FROM deliveries WHERE event_id=$1', [event.id])).rows;
+    expect(original).toHaveLength(1);
+    await subscription(type);
+    expect(await withTx(client => processRouting(client, event.id))).toBe(false);
+    expect((await pool.query('SELECT id FROM deliveries WHERE event_id=$1', [event.id])).rows).toEqual(original);
+  });
+
+  it('rejects an unknown routing notification instead of acknowledging nonexistent durable work', async () => {
+    await expect(withTx(client => processRouting(client, randomUUID()))).rejects.toThrow('Routing job not found');
+  });
+
+  it('uses the injected dispatcher and drains it before stopping', async () => {
+    const type = `worker.injected-dispatch.${randomUUID()}`;
+    await subscription(type);
+    const event = await ingest(producer, randomUUID(), { type, source: 'worker-integration', payload: {} });
+    const dispatcher = createFanoutDispatcher();
+    const entered = signal(), release = signal();
+    releaseResponses.push(release.resolve);
+    let calls = 0;
+    const worker = startWorkers({
+      intervalMs: 60_000, batchSize: 1,
+      fanoutDispatcher: {
+        backend: dispatcher.backend,
+        dispatchOnce: async () => {
+          calls++;
+          const count = await dispatcher.dispatchOnce();
+          entered.resolve();
+          await release.promise;
+          return count;
+        },
+      },
+    });
+    workers.push(worker);
+    await entered.promise;
+    const stopping = worker.stop();
+    release.resolve();
+    await stopping;
+    expect(calls).toBe(1);
+    expect((await pool.query('SELECT status FROM fanout_jobs WHERE event_id=$1', [event.id])).rows[0].status).toBe('done');
+    expect((await pool.query('SELECT status FROM deliveries WHERE event_id=$1', [event.id])).rows).toEqual([{ status: 'pending' }]);
   });
 
   it('rolls back claim and attempt count if the pre-send audit insert fails', async () => {

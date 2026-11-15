@@ -2,9 +2,10 @@ import { Pool, type PoolClient } from 'pg';
 import { readFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import type { DeliveryMode, EventInput, FilterRules } from './types.js';
-import { matches, retryDelay, shouldRetry } from './rules.js';
+import type { DeliveryMode, EventInput } from './types.js';
+import { retryDelay, shouldRetry } from './rules.js';
 import { sendWebhook } from './webhook.js';
+import { processRouting } from './routing.js';
 
 export const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -58,21 +59,12 @@ export async function ingest(producerId: string, key: string, event: EventInput,
 }
 
 export async function fanoutOnce(): Promise<number> {
-  // One atomic batch using the active subscriptions observed in this transaction.
-  // There are no durable subscription versions or resumable fanout cursors.
   return withTx(async c => {
-    const job = await c.query(`UPDATE fanout_jobs SET status='processing', locked_until=now()+interval '30 seconds'
+    const job = await c.query<{ event_id: string }>(`UPDATE fanout_jobs SET status='processing', locked_until=now()+interval '30 seconds'
       WHERE event_id=(SELECT event_id FROM fanout_jobs WHERE status='pending' OR (status='processing' AND locked_until<now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
       RETURNING event_id`);
     if (!job.rowCount) return 0;
-    const event = (await c.query('SELECT * FROM events WHERE id=$1', [job.rows[0].event_id])).rows[0];
-    const subs = await c.query('SELECT * FROM subscriptions WHERE active=true');
-    for (const sub of subs.rows) if (matches(event, sub.rules as FilterRules)) {
-      await c.query(`INSERT INTO deliveries(id,event_id,subscription_id,webhook_url,secret,delivery_mode)
-        VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(event_id,subscription_id) DO NOTHING`,
-        [randomUUID(), event.id, sub.id, sub.webhook_url, sub.secret, sub.delivery_mode]);
-    }
-    await c.query("UPDATE fanout_jobs SET status='done',locked_until=NULL WHERE event_id=$1", [event.id]);
+    await processRouting(c, job.rows[0].event_id);
     return 1;
   });
 }

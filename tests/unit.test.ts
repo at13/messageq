@@ -1,7 +1,24 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { matches, retryDelay, shouldRetry, parseRetryAfter } from '../src/rules.js';
 import { getEventQueueCapacity } from '../src/db.js';
 import { eventSchema, rulesSchema } from '../src/validation.js';
+import { createFanoutDispatcher } from '../src/fanout.js';
+import { startWorkers } from '../src/worker.js';
+describe('fanout dispatcher configuration', () => {
+  it('rejects unsupported backends rather than silently falling back to PostgreSQL', () => {
+    for (const backend of ['redis_streams', 'kafka', '', 'unknown']) {
+      expect(() => createFanoutDispatcher(backend)).toThrow('Unsupported FANOUT_DISPATCHER');
+    }
+  });
+  it('reads the environment and rejects unsupported configuration before workers start', () => {
+    vi.stubEnv('FANOUT_DISPATCHER', 'kafka');
+    try {
+      expect(() => startWorkers()).toThrow('Unsupported FANOUT_DISPATCHER');
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
 describe('JSON events and filter validation', () => {
   it('accepts all JSON payload shapes and rejects an absent payload', () => {
     for (const payload of [null, false, 0, 'hello', [1, { nested: true }], { a: null }]) {

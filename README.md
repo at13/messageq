@@ -33,6 +33,30 @@ Review/deactivate legacy subscriptions created while the earlier demo was
 unauthenticated before sending real data; new authentication does not retroactively
 establish ownership or trust in old registered destinations.
 
+## Configurable fanout dispatch
+
+Set `FANOUT_DISPATCHER=postgresql` (the default). PostgreSQL is currently the only
+implemented dispatcher; `redis_streams`, `kafka`, empty or unknown values fail
+startup before the API listens. There is no silent fallback or broker dependency.
+
+[The dispatcher interface/factory](./src/fanout.ts) selects how durable routing
+work reaches [the shared routing processor](./src/routing.ts). The PostgreSQL
+adapter claims a job and invokes that processor in the same transaction.
+The processor locks routing state, evaluates subscriptions, persists matching
+deliveries and marks routing complete atomically. Duplicate notifications for
+completed events are no-ops, even if subscriptions subsequently change.
+
+PostgreSQL remains the system of record for events, subscriptions, routing state,
+deliveries and audit with every future transport. A Redis Streams or Kafka adapter
+can implement `FanoutDispatcher` and be registered in the factory without duplicating
+matching logic. It must invoke `processRouting` inside `withTx`, acknowledge broker
+messages only after commit, and publish from the durable PostgreSQL job/outbox
+rather than introduce a lossy database/broker dual write. Broker client lifecycle
+and transport-specific redelivery will be implemented with those adapters.
+`dispatchOnce` returns a handled-work count (including acknowledged duplicates);
+zero means the dispatcher is idle.
+Webhook delivery guarantees and PostgreSQL queue admission are unchanged.
+
 ## Public deployment and local testing
 
 The connected deployment is **https://143.110.253.222**. Nginx terminates trusted
