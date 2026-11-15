@@ -14,7 +14,11 @@ The initial architecture uses:
 ```mermaid
 flowchart LR
     P[Event producers] --> API[Ingestion API: authenticate and validate]
-    API --> TX[Atomic commit: event + fanout job]
+    API --> ADMIT[Transactional idempotency and queue admission]
+    ADMIT -->|New event and available slot| TX[Atomic commit: event + fanout job]
+    ADMIT -->|Existing event with matching content| ACK
+    ADMIT -->|Queue full| FULL[503 EVENT_QUEUE_FULL with Retry-After]
+    FULL --> P
     TX --> EQ[(Durable events and fanout jobs)]
     TX --> ACK[202 Accepted only after commit]
     ACK --> P
@@ -121,6 +125,14 @@ It returns `202 Accepted` only after commit.
 **Accepted means durably stored, not delivered.** If the producer loses the response, it retries with the same idempotency key and receives the existing event ID. Reusing the key with different content returns a conflict.
 
 If the database cannot commit, the API returns an error instead of accepting the event. Database replication, backups, and recovery must meet the required data-loss objective.
+
+#### Bounded Event Admission
+
+`EVENT_QUEUE_CAPACITY` caps unfinished fanout jobs, defaulting to 10000. Pending and processing jobs count; routing completion releases capacity without deleting the accepted event. Retained events and downstream delivery backlog are not capped by this setting.
+
+A transaction-scoped PostgreSQL advisory lock serializes ingestion across replicas. The API checks idempotency first, then capacity, then inserts the event and fanout job atomically. Full queues reject new events with `503`, code `EVENT_QUEUE_FULL`, and `Retry-After: 5`; no rejected event/job is persisted. Matching idempotent retries still return `202`, while conflicting content returns `409`. Object key ordering is ignored in content comparison.
+
+Use the same capacity on every replica. Unfinished-job counting uses a partial index, but the global admission lock and count are an intentional throughput trade-off. Mixed deployments with old code bypassing the gate can invalidate the bound. Database unavailability and delivery-queue growth remain separate failure modes.
 
 ### 3. Fanout Worker Finds Matching Consumers
 
@@ -330,14 +342,15 @@ Multiple API and worker nodes can share PostgreSQL; a broker is not required jus
 
 | Scaling challenge | Multi-node failure point and impact | Current implementation and required hardening |
 |---|---|---|
-| Load balancing and ingestion retries | A producer retries against a different replica after a lost response. Two replicas concurrently check the same idempotency key and attempt insertion. | The database uniqueness constraint prevents duplicate events, but the current check-then-insert race can return a database error rather than the existing event. Use concurrency-safe insertion/conflict handling and content comparison. |
+| Load balancing and ingestion retries | A producer retries against a different replica after a lost response. Two replicas concurrently check the same idempotency key and attempt insertion. | Transaction-scoped admission locking now coordinates idempotency lookup and insertion; equivalent JSON replays return the existing ID. Preserve this coordination when replacing the global lock for higher throughput. |
+| Full event queue | More API replicas can admit work faster than fanout workers route it; independent per-node counts can overshoot a global limit. | `EVENT_QUEUE_CAPACITY` and the shared transactional admission lock bound unfinished fanout jobs. Reject new work with `503` and `Retry-After`; do not reject matching retries of accepted events or silently drop accepted work. |
 | Shared database capacity | All replicas compete for database CPU, I/O, WAL, locks, and connections. Adding replicas can increase contention instead of throughput. | Budget total connections across every process, reserve operational headroom, configure connection/acquisition timeouts, consider pooling, and scale against measured database capacity rather than CPU alone. |
 | Connection-pool exhaustion | Delivery workers retain a checked-out connection after claim commit while borrowing additional connections for event reads and outcome transactions. Enough concurrent workers can occupy the pool and wait on each other. | Release claim connections before HTTP I/O and subsequent pool operations. Bound worker concurrency against the pool budget. |
 | Overlapping polling loops | Each replica runs an asynchronous `setInterval`; a slow iteration can overlap later ticks. Replica count multiplies this uncontrolled concurrency. | Use a non-overlapping scheduler or bounded worker pool; separate API, fanout, and delivery entry points so scaling one workload does not unintentionally scale all three. |
 | Lease expiry and stale workers | Worker A stalls beyond its 30-second delivery lease; worker B reclaims the delivery. Both may send, and A can later overwrite B's recorded success with a failure or retry. | `SKIP LOCKED` protects claim transactions, not work after commit. Add claim tokens/generations and conditional outcome updates; renew leases when appropriate and ensure request timeouts fit the lease. Fencing protects stored state, not exactly-once external HTTP effects. |
 | At-most-once recovery | A node crashes after consuming its send authorization. Another node must not resend even if no audit outcome exists. | The current pre-send terminal state prevents reclaim, but crashes can leave no attempt history. Persist authorization/attempt start atomically and reconcile unresolved outcomes without restoring authorization. |
 | Fanout amplification | Each event scans all active subscriptions and inserts every match in one transaction. Large fanouts hold locks/connections and generate high write volume. | Current fanout is atomic and uniqueness-protected, but unbatched. Add candidate indexes, bounded batches, durable routing snapshots/checkpoints, and event/subscriber quotas. |
-| Queue and audit query growth | Multiple pollers repeatedly scan growing job/delivery tables. Unindexed history queries and accumulated completed records compete with ingestion. | The schema currently lacks dedicated pending-work and audit-query indexes. Add indexes based on query plans, paginate history, and define retention/archival that never deletes pending work or required idempotency evidence. |
+| Queue and audit query growth | Multiple pollers repeatedly scan growing job/delivery tables. Unindexed history queries and accumulated completed records compete with ingestion. | A partial unfinished-fanout index supports admission counts. Delivery polling and audit-query indexes still need hardening based on query plans; paginate history and define retention without deleting pending work or required idempotency evidence. |
 | Subscription consistency | Concurrent deletion or configuration changes race with routing. Future per-node caches can disagree about eligible subscriptions. | Current fanout reads active subscriptions within a transaction and snapshots delivery destinations, but has no durable versioned routing snapshot. Define the snapshot boundary, persist versions for batched routing, and invalidate/version caches if introduced. |
 | Per-consumer limits and fairness | A per-node concurrency limit multiplies across replicas. One hot subscription or tenant can exhaust workers or overwhelm its webhook. | No aggregate endpoint limit currently exists. Use coordinated limits or partition ownership, tenant fairness, bounded work admission, and slow-consumer isolation. |
 | Retry storms | Replicas retry many failures at the same deterministic backoff interval, especially after an outage, overwhelming recovered consumers and the database. | Current backoff is exponential and capped but has no jitter or `Retry-After` handling. Add jitter, bounded server-directed delays, fair retry scheduling, and explicit retry-budget/redrive policy. |
@@ -355,7 +368,7 @@ Multiple API and worker nodes can share PostgreSQL; a broker is not required jus
 
 ### Safe Scale-Out Sequence and Verification
 
-1. Make idempotent ingestion race-safe, release database connections promptly, and bound/non-overlap worker execution.
+1. Preserve atomic queue admission and idempotency when increasing ingestion parallelism, release database connections promptly, and bound/non-overlap worker execution.
 2. Add claim fencing, durable pre-send attempt records, crash reconciliation, work/query indexes, and aggregate consumer limits.
 3. Separate API and worker deployment roles, place API replicas behind a health-aware load balancer, and coordinate migrations.
 4. Run concurrent replicas in integration tests: same-key ingestion races; fanout races; expired leases with a late worker result; at-most-once crash recovery; shared-inbox receiver deduplication; and slow-consumer isolation.

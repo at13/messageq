@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS fanout_jobs (
   locked_until timestamptz,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS fanout_jobs_unfinished_idx ON fanout_jobs(event_id) WHERE status <> 'done';
 CREATE TABLE IF NOT EXISTS deliveries (
   id uuid PRIMARY KEY,
   event_id uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE,

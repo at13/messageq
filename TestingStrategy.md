@@ -112,6 +112,7 @@ Do not write tests that merely restate implementation details or test framework 
 
 ## Implemented Viewer and Load Tests
 
+- [tests/integration.test.ts](./tests/integration.test.ts) verifies `503 EVENT_QUEUE_FULL` and `Retry-After`, absence of rejected records, idempotent/conflicting replays while full, simultaneous admissions from separate API instances, and capacity release after routing.
 - The load runner is in [tests/load-test.ts](./tests/load-test.ts); [tests/load-test.test.ts](./tests/load-test.test.ts) covers bounded concurrency, unique keys, rate/duration limits, request caps, malformed/duplicate acceptance responses, HTTP/network errors, latency thresholds, and interrupted runs.
 - [tests/viewer.integration.test.ts](./tests/viewer.integration.test.ts) uses real PostgreSQL and a listening Fastify server to verify gated viewer availability, session-scoped management, signed webhook receipts, simulated retries, at-most-once failure, and concurrent transactional receipt deduplication.
 - Set `DATABASE_URL` to an isolated test database. Tests clean up their own events, subscriptions, and sessions; do not run them against production.

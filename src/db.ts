@@ -1,10 +1,29 @@
 import { Pool, type PoolClient } from 'pg';
 import { readFile } from 'node:fs/promises';
 import { randomUUID, createHmac } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { DeliveryMode, EventInput, FilterRules } from './types.js';
 import { matches, retryDelay, shouldRetry } from './rules.js';
 
 export const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+export function getEventQueueCapacity(value: string | number = process.env.EVENT_QUEUE_CAPACITY ?? 10000): number {
+  const capacity = Number(value);
+  if (!Number.isInteger(capacity) || capacity < 1 || capacity > 1_000_000) {
+    throw new Error('EVENT_QUEUE_CAPACITY must be an integer between 1 and 1000000');
+  }
+  return capacity;
+}
+
+export class EventQueueFullError extends Error {
+  readonly queuedEvents: number;
+  readonly capacity: number;
+  constructor(queuedEvents: number, capacity: number) {
+    super('Event queue is full');
+    this.name = 'EventQueueFullError';
+    this.queuedEvents = queuedEvents;
+    this.capacity = capacity;
+  }
+}
 export async function migrate(): Promise<void> { await pool.query(await readFile(new URL('../schema.sql', import.meta.url), 'utf8')); }
 export async function withTx<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
   const c = await pool.connect();
@@ -12,14 +31,18 @@ export async function withTx<T>(fn: (client: PoolClient) => Promise<T>): Promise
   catch (e) { await c.query('ROLLBACK'); throw e; } finally { c.release(); }
 }
 
-export async function ingest(producerId: string, key: string, event: EventInput) {
+export async function ingest(producerId: string, key: string, event: EventInput, capacity = getEventQueueCapacity()) {
   return withTx(async c => {
+    // Coordinate admission and idempotency across replicas before checking capacity.
+    await c.query("SELECT pg_advisory_xact_lock(hashtextextended('messageq:event-admission', 0))");
     const existing = await c.query('SELECT id, type, source, payload FROM events WHERE producer_id=$1 AND idempotency_key=$2', [producerId, key]);
     if (existing.rowCount) {
       const row = existing.rows[0];
-      if (row.type !== event.type || row.source !== event.source || JSON.stringify(row.payload) !== JSON.stringify(event.payload)) throw Object.assign(new Error('idempotency key conflict'), { statusCode: 409 });
+      if (row.type !== event.type || row.source !== event.source || !isDeepStrictEqual(row.payload, event.payload)) throw Object.assign(new Error('idempotency key conflict'), { statusCode: 409 });
       return row;
     }
+    const queued = (await c.query<{ count: number }>("SELECT count(*)::integer AS count FROM fanout_jobs WHERE status <> 'done'")).rows[0].count;
+    if (queued >= capacity) throw new EventQueueFullError(queued, capacity);
     const id = randomUUID();
     await c.query('INSERT INTO events(id,type,source,payload,idempotency_key,producer_id) VALUES($1,$2,$3,$4,$5,$6)', [id, event.type, event.source, event.payload, key, producerId]);
     await c.query('INSERT INTO fanout_jobs(event_id) VALUES($1)', [id]);
