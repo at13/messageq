@@ -8,11 +8,12 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json",
     "start": "node dist/main.js",
+    "load:test": "tsc -p tsconfig.load.json && node dist-tests/load-test.js",
     "dev": "npm run build && node --env-file=.env dist/main.js",
     "migrate": "npm run build && node dist/migrate.js",
     "test": "vitest run",
-    "test:unit": "vitest run tests/unit.test.ts",
-    "test:integration": "vitest run tests/integration.test.ts"
+    "test:unit": "vitest run tests/unit.test.ts tests/load-test.test.ts",
+    "test:integration": "vitest run tests/integration.test.ts tests/viewer.integration.test.ts"
   },
   "dependencies": {
     "fastify": "^5.6.2",

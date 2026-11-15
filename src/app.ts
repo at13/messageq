@@ -4,11 +4,15 @@ import { randomUUID } from 'node:crypto';
 import { ingest, pool } from './db.js';
 import type { DeliveryMode } from './types.js';
 import { isWebhookSafe } from './url.js';
+import { registerTestViewer } from './test-viewer.js';
 
 const eventSchema = z.object({ type: z.string().min(1), source: z.string().min(1), payload: z.record(z.string(), z.unknown()) });
 const subSchema = z.object({ webhookUrl: z.string().url(), secret: z.string().min(8), deliveryMode: z.enum(['at_most_once','at_least_once','exactly_once']).default('at_least_once'), rules: z.object({ type: z.string().optional(), source: z.string().optional(), payload: z.record(z.string(), z.unknown()).optional() }).default({}) });
-export function buildApp() {
+export function buildApp(options: { testViewer?: boolean; callbackOrigin?: string } = {}) {
   const app = Fastify({ logger: true });
+  if (options.testViewer) {
+    app.register(async scoped => registerTestViewer(scoped, options.callbackOrigin));
+  }
   app.post('/events', async (request, reply) => {
     const parsed = eventSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues });

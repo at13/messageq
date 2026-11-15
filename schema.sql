@@ -48,3 +48,23 @@ CREATE TABLE IF NOT EXISTS delivery_attempts (
   outcome text NOT NULL,
   error text
 );
+CREATE TABLE IF NOT EXISTS test_viewer_sessions (
+  id uuid PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS test_viewer_subscriptions (
+  subscription_id uuid PRIMARY KEY REFERENCES subscriptions(id) ON DELETE CASCADE,
+  session_id uuid NOT NULL REFERENCES test_viewer_sessions(id) ON DELETE CASCADE,
+  callback_token text NOT NULL,
+  failures_remaining integer NOT NULL DEFAULT 0,
+  received_attempts integer NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS test_viewer_receipts (
+  delivery_id uuid PRIMARY KEY REFERENCES deliveries(id) ON DELETE CASCADE,
+  subscription_id uuid NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+  event_id uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  notification jsonb NOT NULL,
+  receive_count integer NOT NULL DEFAULT 1,
+  first_received_at timestamptz NOT NULL DEFAULT now(),
+  last_received_at timestamptz NOT NULL DEFAULT now()
+);

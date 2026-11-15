@@ -110,6 +110,13 @@ Do not write tests that merely restate implementation details or test framework 
 - Run multiple API and worker instances to expose contention and verify policy-aware coordination.
 - Validate database backup restoration and failover separately against the promised durability objective.
 
+## Implemented Viewer and Load Tests
+
+- The load runner is in [tests/load-test.ts](./tests/load-test.ts); [tests/load-test.test.ts](./tests/load-test.test.ts) covers bounded concurrency, unique keys, rate/duration limits, request caps, malformed/duplicate acceptance responses, HTTP/network errors, latency thresholds, and interrupted runs.
+- [tests/viewer.integration.test.ts](./tests/viewer.integration.test.ts) uses real PostgreSQL and a listening Fastify server to verify gated viewer availability, session-scoped management, signed webhook receipts, simulated retries, at-most-once failure, and concurrent transactional receipt deduplication.
+- Set `DATABASE_URL` to an isolated test database. Tests clean up their own events, subscriptions, and sessions; do not run them against production.
+- Viewer tests demonstrate a transactional database receipt as the business effect. They do not prove arbitrary external exactly-once effects or complete production crash/failover guarantees.
+
 ## Initial Priority
 
 Start with:
