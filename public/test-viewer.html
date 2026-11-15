@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MessageQ Test Viewer</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, sans-serif; background: #101827; color: #e7edf7; }
+    body { max-width: 1200px; margin: auto; padding: 24px; }
+    h1 { margin-bottom: 8px; } h2 { font-size: 1.2rem; }
+    p { line-height: 1.5; } .muted { color: #afbdd2; }
+    .notice { background: #3b2c12; border: 1px solid #a97d29; padding: 12px; border-radius: 8px; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+    section { background: #182438; border: 1px solid #32425c; border-radius: 12px; padding: 20px; margin-top: 20px; }
+    label { display: block; margin: 12px 0 6px; }
+    input, select, textarea, button { font: inherit; border-radius: 6px; }
+    input:not([type=checkbox]), select, textarea { box-sizing: border-box; width: 100%; padding: 10px; background: #101827; color: #e7edf7; border: 1px solid #536782; }
+    textarea { font-family: ui-monospace, monospace; resize: vertical; }
+    button { padding: 10px 16px; background: #3564d8; color: white; border: 0; cursor: pointer; margin: 10px 8px 0 0; }
+    button:disabled { opacity: .5; cursor: wait; }
+    button.secondary { background: #35445e; }
+    #status { padding: 12px 0; overflow-wrap: anywhere; }
+    #status[data-error=true] { color: #ffb0a8; }
+    .item { border-top: 1px solid #43516b; padding: 12px 0; overflow-wrap: anywhere; }
+    pre { overflow: auto; white-space: pre-wrap; background: #101827; border-radius: 6px; padding: 12px; }
+    .toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .toolbar label { margin: 0; } code { overflow-wrap: anywhere; }
+  </style>
+  <script src="/test-viewer/app.js" defer></script>
+</head>
+<body>
+  <h1>MessageQ Test Viewer</h1>
+  <p class="muted">Send an event, match a subscription, and watch the signed notification arrive.</p>
+  <p class="notice">Test-only service. This public HTTP deployment has no production authentication or TLS.
+    Do not send sensitive data. The built-in receiver deduplicates by delivery ID; one receipt represents one demo business effect.</p>
+  <div class="toolbar">
+    <button id="new-session" class="secondary">New test session</button>
+    <button id="refresh" class="secondary">Refresh</button>
+    <label><input id="auto-refresh" type="checkbox" checked> Refresh every 2 seconds</label>
+  </div>
+  <p class="muted">Session: <code id="session-id">Connecting...</code></p>
+  <div id="status" role="status" aria-live="polite"></div>
+  <div class="grid">
+    <section>
+      <h2>1. Subscribe</h2>
+      <p class="muted">Notifications go to the built-in receiver. Rules use exact type/source and dot-path payload equality.</p>
+      <form id="subscribe-form">
+        <label for="mode">Delivery mode</label>
+        <select id="mode">
+          <option value="at_least_once">At-least-once</option>
+          <option value="at_most_once">At-most-once</option>
+          <option value="exactly_once">Exactly-once processing (demo inbox)</option>
+        </select>
+        <label for="rules">Filter rules (JSON)</label>
+        <textarea id="rules" rows="5" required></textarea>
+        <label for="fail-first">Fail the first N requests with HTTP 503 (0-10)</label>
+        <input id="fail-first" type="number" min="0" max="10" value="0" required>
+        <button type="submit">Create subscription</button>
+      </form>
+    </section>
+    <section>
+      <h2>2. Send an event</h2>
+      <form id="event-form">
+        <label for="event-type">Type</label>
+        <input id="event-type" required>
+        <label for="event-source">Source</label>
+        <input id="event-source" value="test-viewer" required>
+        <label for="event-payload">Payload (JSON object)</label>
+        <textarea id="event-payload" rows="5" required>{"message":"Hello from the viewer","customer":{"tier":"gold"}}</textarea>
+        <button type="submit">Send event</button>
+      </form>
+      <p class="muted">202 means accepted, not delivered. Retry behavior is visible below.</p>
+      <div id="sent-events"></div>
+    </section>
+  </div>
+  <section>
+    <h2>Subscriptions</h2>
+    <div id="subscriptions"></div>
+  </section>
+  <section>
+    <h2>Delivery state and attempt history</h2>
+    <div id="deliveries"></div>
+  </section>
+  <section>
+    <h2>3. Received notifications</h2>
+    <p class="muted">The newest 100 receipts are shown. Repeated requests update the receipt's receive count without creating a second demo business effect.</p>
+    <div id="notifications"></div>
+  </section>
+</body>
+</html>
