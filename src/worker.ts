@@ -1,5 +1,6 @@
-import { deliverOnce, fanoutOnce, type AttemptObservation } from './db.js';
+import { deliverOnce, type AttemptObservation } from './db.js';
 import { deliveryAttempts, deliveryDuration } from './metrics.js';
+import { createFanoutDispatcher, type FanoutDispatcher } from './fanout.js';
 
 export type WorkerLogger = {
   info: (fields: Record<string, unknown>, message: string) => void;
@@ -11,6 +12,7 @@ export type WorkerOptions = {
   timeoutMs?: number;
   leaseMs?: number;
   logger?: WorkerLogger;
+  fanoutDispatcher?: FanoutDispatcher;
 };
 export type Workers = { stop: () => Promise<void> };
 
@@ -32,6 +34,7 @@ export function startWorkers(options: WorkerOptions = {}): Workers {
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= timeoutMs) {
     throw new Error('worker leaseMs must be an integer exceeding timeoutMs');
   }
+  const fanoutDispatcher = options.fanoutDispatcher ?? createFanoutDispatcher();
   let stopping = false;
   let wake: (() => void) | undefined;
   const observe = (attempt: AttemptObservation) => {
@@ -50,7 +53,7 @@ export function startWorkers(options: WorkerOptions = {}): Workers {
     while (!stopping) {
       try {
         for (let i = 0; i < batchSize && !stopping; i++) {
-          if (!await fanoutOnce()) break;
+          if (!await fanoutDispatcher.dispatchOnce()) break;
         }
         for (let i = 0; i < batchSize && !stopping; i++) {
           if (!await deliverOnce({ timeoutMs, leaseMs, onAttempt: observe })) break;

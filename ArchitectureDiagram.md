@@ -3,6 +3,31 @@
 This diagram describes the code that exists, not a proposed managed-queue extension.
 Logical stores below are PostgreSQL tables in one database.
 
+## Fanout dispatch boundary
+
+```mermaid
+flowchart TD
+    Store[(PostgreSQL: events, subscriptions, routing state, deliveries, audit)] --> Dispatch[Configurable fanout dispatch]
+    Dispatch --> PG[PostgreSQL: implemented]
+    Dispatch -.-> Redis[Redis Streams: future adapter]
+    Dispatch -.-> Kafka[Kafka: future adapter]
+    PG --> Routing[Shared routing processor]
+    Redis -.-> Routing
+    Kafka -.-> Routing
+    Routing --> Store
+```
+
+`FANOUT_DISPATCHER=postgresql` is the default and only supported setting today.
+Unsupported settings fail startup before accepting events. The dispatcher
+interface separates transport from shared routing; PostgreSQL remains authoritative
+regardless of a future transport choice. PostgreSQL dispatch claims and routes
+within one transaction. The shared processor locks routing state and skips already
+completed work, preventing broker duplicates from adding deliveries for later
+subscriptions. Future broker adapters must use transactional routing and ACK only
+after commit, with durable publication from PostgreSQL jobs/outbox.
+
+## Current end-to-end flow
+
 ```mermaid
 flowchart TD
     Producer[Producer: event and stable idempotency key] --> Edge[Nginx: trusted HTTPS, body limit, rate limit]
@@ -17,8 +42,8 @@ flowchart TD
     Commit --> Accepted
     Commit --> Events[(Events and fanout jobs)]
     SubAPI[Authenticated create/list/deactivate subscription] --> Subs[(Active subscriptions and rules)]
-    Events --> Fanout[Worker claims fanout job with token and lease]
-    Subs --> Match[Scan active subscriptions and evaluate equality rules]
+    Events --> Fanout[Configured PostgreSQL dispatcher: transactional job claim]
+    Subs --> Match[Shared routing processor: lock state and evaluate equality rules]
     Fanout --> Match
     Match --> Route[Atomic transaction: unique matching deliveries and job done]
     Route --> Deliveries[(Deliveries: pending, delivered, failed)]
